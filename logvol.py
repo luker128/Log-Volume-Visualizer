@@ -102,7 +102,7 @@ class LogAnalyzer:
         #       will never be appended as 'for line in file' will finish without detecting change
         timeAfter = time.time()
         timeElapsed = timeAfter - timeBefore
-        print("{} lines processed into {} samples in {:.2f} seconds".format(lines, len(data), timeElapsed))
+        print("{:,} lines processed into {:,} samples in {:.2f} seconds".format(lines, len(data), timeElapsed))
         return data, labels, filePositions
 
 ####
@@ -157,59 +157,51 @@ class Plot:
 
     def getStatistics(self):
         sampleAtCursor = self.getSampleAt(self.last_mouse_x)
-        totalStart = self.labels[0].strftime("%H:%M:%S")
-        totalEnd = self.labels[-1].strftime("%H:%M:%S")
+        totalStart = self.labels[0]
+        totalEnd = self.labels[-1]
         totalDuration = self.labels[-1] - self.labels[0]
         totalTotal = sum(self.samples)
         totalMax = max(self.samples)
         totalMin = min(self.samples)
         totalAvg = round(totalTotal / len(self.samples), 3)
-        visibleStart = self.labels[self.visibleRange[0]].strftime("%H:%M:%S")
-        visibleEnd = self.labels[self.visibleRange[1]-1].strftime("%H:%M:%S")
+        visibleStart = self.labels[self.visibleRange[0]]
+        visibleEnd = self.labels[self.visibleRange[1]-1]
         visibleDuration = self.labels[self.visibleRange[1]-1] - self.labels[self.visibleRange[0]]
         visibleTotal = sum(self.samples[self.visibleRange[0]:self.visibleRange[1]])
         visibleMax = max(self.samples[self.visibleRange[0]:self.visibleRange[1]])
         visibleMin = min(self.samples[self.visibleRange[0]:self.visibleRange[1]])
         visibleAvg = round(visibleTotal / (self.visibleRange[1] - self.visibleRange[0]), 3)
         if self.selection is not None:
-            selectionStart = self.labels[self.selection[0]].strftime("%H:%M:%S")
-            selectionEnd = self.labels[self.selection[1]].strftime("%H:%M:%S")
+            selectionStart = self.labels[self.selection[0]]
+            selectionEnd = self.labels[self.selection[1]]
             selectionDuration =  self.labels[self.selection[1]] - self.labels[self.selection[0]]
             selectionTotal = sum(self.samples[self.selection[0]:self.selection[1]])
             selectionMax = max(self.samples[self.selection[0]:self.selection[1]])
             selectionMin = min(self.samples[self.selection[0]:self.selection[1]])
             selectionAvg = round(selectionTotal / (self.selection[1] - self.selection[0]), 3)
-        else:
-            selectionStart = "-"
-            selectionEnd = "-"
-            selectionDuration = "-"
-            selectionTotal = "-"
-            selectionMin = "-"
-            selectionMax = "-"
-            selectionAvg = "-"
-        return {"cursor-value": sampleAtCursor[1],
-                "cursor-label": sampleAtCursor[2].strftime("%H:%M:%S"),
-                "total-start": totalStart,
-                "total-end": totalEnd,
-                "total-duration": totalDuration,
-                "total-total": totalTotal,
-                "total-min": totalMin,
-                "total-max": totalMax,
-                "total-avg": totalAvg,
-                "visible-start": visibleStart,
-                "visible-end": visibleEnd,
-                "visible-duration": visibleDuration,
-                "visible-total": visibleTotal,
-                "visible-min": visibleMin,
-                "visible-max": visibleMax,
-                "visible-avg": visibleAvg,
-                "selection-start": selectionStart,
-                "selection-end": selectionEnd,
-                "selection-duration": selectionDuration,
-                "selection-total": selectionTotal,
-                "selection-min": selectionMin,
-                "selection-max": selectionMax,
-                "selection-avg": selectionAvg,
+        return {"cursor-value":       sampleAtCursor[1],
+                "cursor-label":       sampleAtCursor[2].strftime("%H:%M:%S"),
+                "total-start":        totalStart.strftime("%H:%M:%S"),
+                "total-end":          totalEnd.strftime("%H:%M:%S"),
+                "total-duration":     totalDuration,
+                "total-total":        "{:,}".format(totalTotal),
+                "total-min":          "{:,}".format(totalMin),
+                "total-max":          "{:,}".format(totalMax),
+                "total-avg":          "{:,}".format(totalAvg),
+                "visible-start":      visibleStart.strftime("%H:%M:%S"),
+                "visible-end":        visibleEnd.strftime("%H:%M:%S"),
+                "visible-duration":   visibleDuration,
+                "visible-total":      "{:,}".format(visibleTotal),
+                "visible-min":        "{:,}".format(visibleMin),
+                "visible-max":        "{:,}".format(visibleMax),
+                "visible-avg":        "{:,}".format(visibleAvg),
+                "selection-start":    selectionStart.strftime("%H:%M:%S") if self.hasSelection() else "-",
+                "selection-end":      selectionEnd.strftime("%H:%M:%S") if self.hasSelection() else "-",
+                "selection-duration": selectionDuration if self.hasSelection() else "-",
+                "selection-total":    "{:,}".format(selectionTotal) if self.hasSelection() else "-",
+                "selection-min":      "{:,}".format(selectionMin) if self.hasSelection() else "-",
+                "selection-max":      "{:,}".format(selectionMax) if self.hasSelection() else "-",
+                "selection-avg":      "{:,}".format(selectionAvg) if self.hasSelection() else "-",
         }
 
     def mouse_motion(self, x, y):
@@ -232,7 +224,10 @@ class Plot:
         elif button == 1:
             start = self.getIndexAt(self.mouse_drag_origin)
             end = self.getIndexAt(x)
-            self.selection = (min(start, end), max(start, end))
+            if start != end:
+                self.selection = (min(start, end), max(start, end))
+            else:
+                self.selection = None
             self.draw()
 
     def mouse_press(self, x, y, button, pressed):
@@ -326,17 +321,34 @@ class Plot:
         else:
             y_scale = 100
         lastLabelAt = 0
+        start_x = x
+
+        max_grid = 16
+        grid_space = w / max_grid
+        index_a, _, _ = self.getSampleAt(x)
+        index_b, _, _ = self.getSampleAt(x+grid_space)
+        grid_space_index = index_b - index_a
+        last_grid_at_index = ((index_a // grid_space_index)) * grid_space_index
+        x = start_x
         for bar_x in range(w+1):
             index, sample, label = self.getSampleAt(x)
-            if self.selection is not None and index > self.selection[0] and index < self.selection[1]:
-                c.create_line((x, y), (x, y+(h-sample*y_scale)), fill='yellow')
-                c.create_line((x, y+h+1), (x, y+(h-sample*y_scale)), fill='red')
-            elif sample != 0:
-                c.create_line((x, y+h+1), (x, y+(h-sample*y_scale)), fill='green')
-            if x - lastLabelAt > 50:
+            if last_grid_at_index + grid_space_index < index:
+                verticalGridLine = True
+                last_grid_at_index = index
                 labelText = label.strftime("%H:%M:%S")
                 c.create_text(x + bar_w/2, y + h+8, text=labelText, font=("Arial", 9), fill="blue", angle=45, anchor='e')
-                lastLabelAt = x
+            else:
+                verticalGridLine = False
+            if self.selection is not None and index > self.selection[0] and index < self.selection[1]:
+                if verticalGridLine:
+                    c.create_line((x, y), (x, y+h), fill='#ddd')
+                else:
+                    c.create_line((x, y), (x, y+(h-sample*y_scale)), fill='yellow')
+                c.create_line((x, y+h+1), (x, y+(h-sample*y_scale)), fill='orange')
+            elif sample != 0:
+                if verticalGridLine:
+                    c.create_line((x, y), (x, y+h), fill='#eee')
+                c.create_line((x, y+h+1), (x, y+(h-sample*y_scale)), fill='green')
             x += 1
 
 class Gui:
