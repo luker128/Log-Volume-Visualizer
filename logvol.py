@@ -8,6 +8,7 @@ import re
 import subprocess
 import os
 import tempfile
+import argparse
 
 ####
 # Log analysis part
@@ -32,46 +33,67 @@ class TimestampFormat:
     def buildTimestamp(self, timeValue):
         return timeValue.strftime(self.timeFormat)
 
-    def detect(line):
+    def detect(line, override):
         formats = [
             "%Y-%m-%d %H:%M:%S",
             "%m-%d %H:%M:%S"
         ]
+        if override is not None:
+            formats = [override]
         for timeFormat in formats:
             regex = datetime.datetime(1111,11,11,11,11,11,111111).strftime(timeFormat).replace("1", r"\d")
             m = re.search(regex, line)
             if m is not None:
                 tf = TimestampFormat(m.start(), m.end(), timeFormat)
                 return tf
+        return None
 
 class LogAnalyzer:
 
     def __init__(self):
-        self.keyword = ""
+        self.dataSeriesLabels = ["Volume"]
+        self.dataSeriesDefinitions = [lambda l : 1]
 
     def addKeyword(self, keyword):
-        self.keyword = keyword
+        self.dataSeriesLabels.append(keyword)
+        self.dataSeriesDefinitions.append(lambda l, k=keyword: 1 if k in l else 0)
 
-    def getCount(self, line):
-        return 1 if self.keyword in line else 0
+    def addRegex(self, regex):
+        self.dataSeriesLabels.append(regex)
+        regexObj = re.compile(regex)
+        self.dataSeriesDefinitions.append(lambda l, r=regexObj: 1 if r.search(l) is not None else 0)
 
-    def analyzeLog(self, filename):
-        data = []
+    def buildDataSeriesInfo(self):
+        return self.dataSeriesLabels
+
+    def appendData(self, data, count):
+        for dataSeries, countSeries in zip(data, count):
+            dataSeries.append(countSeries)
+
+    def analyzeLog(self, filename, timestampFormatOverride):
+        data = [[]] * len(self.dataSeriesLabels)
         labels = []
         filePositions = []
-        count = 0
+        count = [0] * len(self.dataSeriesLabels)
         lastTimestamp = ""
         lastTimeValue = 0
-        timeBefore = time.time()
         lines = 0
         timestampFormat = None
+        timeBefore = time.time()
+        startFilePosition = 0
+        filePositionBeforeReadLine = 0
         with open(filename) as file:
-            for line in file:
+            while True:
+                line = file.readline()
+                if line == "":
+                    break
                 lines += 1
                 if timestampFormat is None:
-                    timestampFormat = TimestampFormat.detect(line)
+                    timestampFormat = TimestampFormat.detect(line, timestampFormatOverride)
                     if timestampFormat is None:
-                        raise RuntimeError("Unknown time format in line \n{}".format(line))
+                        print("Unrecognized timestamp format")
+                        print("Please rerun providing timestamp format with '-f'")
+                        return None
                     lastTimestamp = timestampFormat.extractTimestamp(line)
                     lastTimeValue = timestampFormat.parseTimestamp(lastTimestamp)
                     print("Detected timestamp '{}' with format '{}'".format(line[timestampFormat.start:timestampFormat.end], timestampFormat.timeFormat))
@@ -79,31 +101,35 @@ class LogAnalyzer:
                 if timestamp != lastTimestamp:
                     timeValue = timestampFormat.parseTimestamp(timestamp)
                     if timeValue is not None:
-                        data.append(count)
+                        self.appendData(data, count)
                         labels.append(lastTimeValue)
-                        filePositions.append( (filename, lines) )
-                        count = 0
+                        filePositions.append( (filename, lines, startFilePosition, filePositionBeforeReadLine) )
+                        count = [0] * len(self.dataSeriesLabels)
                         timeDelta = (timeValue - lastTimeValue).total_seconds()
                         if timeDelta > 1.5:
                             samplesToInsert = int(timeDelta) - 1
                             for i in range(samplesToInsert):
-                                data.append(self.getCount(""))
+                                self.appendData(data, [0] * len(self.dataSeriesLabels))
                                 intermediateTimeValue = lastTimeValue + datetime.timedelta(seconds = i+1)
                                 labels.append(intermediateTimeValue)
-                                filePositions.append( (filename, lines) )
+                                filePositions.append( (filename, lines, startFilePosition, filePositionBeforeReadLine) )
                         lastTimeValue = timeValue
                         lastTimestamp = timestamp
+                        startFilePosition = filePositionBeforeReadLine
                     else:
                         print("timestamp not found in line", line)
                         # timestamp not found, skipping this line
                         pass
-                count += self.getCount(line)
-        # TODO: since samples and labels are only appended on timestamp change, the last sample in file
-        #       will never be appended as 'for line in file' will finish without detecting change
+                for i, countGetter in enumerate(self.dataSeriesDefinitions):
+                    count[i] += countGetter(line)
+                filePositionBeforeReadLine += len(line)
+        self.appendData(data, count)
+        labels.append(lastTimeValue)
+        filePositions.append( (filename, lines, startFilePosition, filePositionBeforeReadLine) )
         timeAfter = time.time()
         timeElapsed = timeAfter - timeBefore
-        print("{:,} lines processed into {:,} samples in {:.2f} seconds".format(lines, len(data), timeElapsed))
-        return data, labels, filePositions
+        print("{:,} lines processed into {:,} samples in {:.2f} seconds".format(lines, len(labels), timeElapsed))
+        return data, labels, filePositions, self.buildDataSeriesInfo()
 
 ####
 # Plot drawing part
@@ -112,7 +138,9 @@ class LogAnalyzer:
 class Plot:
 
     def __init__(self, data):
-        self.samples, self.labels, self.filePositions = data
+        self.dataSeries, self.labels, self.filePositions, self.dataSeriesInfo = data
+        self.currentDataSeries = 0
+        self.samples = self.dataSeries[self.currentDataSeries]
         self.margin = 8
         self.visibleRange = (0, len(self.samples))
         self.last_mouse_x = 0
@@ -120,26 +148,32 @@ class Plot:
         self.mouse_dragging = None
         self.selection = None
 
+    def getCurrentDataSeries(self):
+        return self.currentDataSeries
+
+    def getDataSeriesInfo(self):
+        return self.dataSeriesInfo
+
+    def selectDataSeries(self, series):
+        self.currentDataSeries = series
+        self.samples = self.dataSeries[self.currentDataSeries]
+        self.draw()
+
     def exportSelection(self):
         # This function doesn't really belong in Plot class, but all input data is available here,
         # so it was most convinient to put it here for now.
         if self.selection is None:
             return
-        start = self.filePositions[self.selection[0]][1]
-        end = self.filePositions[self.selection[1]][1]
+        startOffset = self.filePositions[self.selection[0]][2]
+        endOffset = self.filePositions[self.selection[1]][3]
         inFile = self.filePositions[self.selection[0]][0]
         outFileFd, outFile = tempfile.mkstemp()
-        print("Exporting lines {} - {} from {} ...".format(start, end, inFile))
+        print("Exporting offsets {} - {} from {} ...".format(startOffset, endOffset, inFile))
         with open(inFile, "r") as file_in:
             with os.fdopen(outFileFd, "w") as file_out:
-                lineNo = 0
-                for line in file_in:
-                    lineNo += 1
-                    if lineNo > start:
-                        if lineNo < end:
-                            file_out.write(line)
-                        else:
-                            break
+                file_in.seek(startOffset)
+                chunk = file_in.read(endOffset - startOffset)
+                file_out.write(chunk)
         print("Starting editor")
         subprocess.run(["$EDITOR {}".format(outFile)], shell = True)
         os.remove(outFile)
@@ -328,6 +362,8 @@ class Plot:
         index_a, _, _ = self.getSampleAt(x)
         index_b, _, _ = self.getSampleAt(x+grid_space)
         grid_space_index = index_b - index_a
+        if grid_space_index == 0:
+            grid_space_index = 1
         last_grid_at_index = ((index_a // grid_space_index)) * grid_space_index
         x = start_x
         for bar_x in range(w+1):
@@ -367,6 +403,7 @@ class Gui:
         self.statLabels[statKey] = valueLabel
 
     def __init__(self, plot):
+        self.plot = plot
         self.root = tk.Tk()
         self.root.geometry('1280x1024')
         self.root.title('Log Volume Visualizer')
@@ -411,7 +448,12 @@ class Gui:
         self.selection_context_menu.add_command(label="Unselect", command=self.menu_action_unselect)
         self.generic_context_menu = tk.Menu(self.root, tearoff=0)
         self.generic_context_menu.add_command(label="Zoom out", command=self.menu_action_zoom_out)
-        self.plot = plot
+
+        for i, dataSeries in enumerate(self.plot.getDataSeriesInfo()):
+            self.generic_context_menu.add_command(label="Switch to data series '{}'".format(dataSeries),
+                                                  command=lambda selectedDs=i: self.menu_action_selectSeries(selectedDs))
+            self.selection_context_menu.add_command(label="Switch to data series '{}'".format(dataSeries),
+                                                  command=lambda selectedDs=i: self.menu_action_selectSeries(selectedDs))
         self.plot.setCanvas(self.canvas)
         self.canvas.bind('<Configure>', self.window_resize)
         self.canvas.bind("<Motion>", self.motion)
@@ -428,6 +470,7 @@ class Gui:
 
     def mainloop(self):
         self.root.mainloop()
+
     def setPlot(self, plot):
         self.plot = plot
 
@@ -501,11 +544,25 @@ class Gui:
         self.plot.clearSelection()
         self.updateStatsPanel()
 
+    def menu_action_selectSeries(self, dataSeries):
+        self.plot.selectDataSeries(dataSeries)
+        self.updateStatsPanel()
+
 def main():
+    parser = argparse.ArgumentParser(description="Draw a graph of amount of logs in time")
+    parser.add_argument("filename")
+    parser.add_argument("-f", "--timestamp-format", help="see 'man date' for format description")
+    parser.add_argument("-k", "--keyword", action="append", default=[])
+    parser.add_argument("-e", "--regex", action="append", default=[])
+    args = parser.parse_args()
     analyzer = LogAnalyzer()
-    if len(sys.argv) > 2:
-        analyzer.addKeyword(sys.argv[2])
-    data = analyzer.analyzeLog(sys.argv[1])
+    for keyword in args.keyword:
+        analyzer.addKeyword(keyword)
+    for regex in args.regex:
+        analyzer.addRegex(regex)
+    data = analyzer.analyzeLog(args.filename, args.timestamp_format)
+    if data is None:
+        return
     plot = Plot(data)
     gui = Gui(plot)
     gui.mainloop()
