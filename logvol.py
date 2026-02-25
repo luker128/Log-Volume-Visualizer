@@ -131,6 +131,42 @@ class LogAnalyzer:
         print("{:,} lines processed into {:,} samples in {:.2f} seconds".format(lines, len(labels), timeElapsed))
         return data, labels, filePositions, self.buildDataSeriesInfo()
 
+def exportDataToFile(data, filename):
+    with open(filename, "w") as file:
+        dataSeries, labels, filePositions, seriesInfo = data
+        file.write("file positions;timestamp")
+        for info in seriesInfo:
+            file.write(";{}".format(info))
+        file.write("\n")
+        for i in range(len(labels)):
+            file.write("{}:{}:{}:{};".format(*filePositions[i]))
+            file.write(str(labels[i]))
+            for series in dataSeries:
+                file.write(";{}".format(series[i]))
+            file.write("\n")
+
+
+def importDataFromFile(filename):
+    with open(filename, "r") as file:
+        allLines = file.readlines()
+        header = allLines[0].strip()
+        headerFields = header.split(";")
+        seriesInfo = headerFields[2:]
+        lines = file.readlines()
+        dataSeries = [[]] * len(seriesInfo)
+        labels = []
+        filePositions = []
+        for line in allLines[1:]:
+            line = line.strip()
+            fields = line.split(";")
+            fpFields = fields[0].split(":")
+            fp = [fpFields[0]] + [int(f) for f in fpFields[1:]]
+            filePositions.append(fp)
+            labels.append(datetime.datetime.strptime(fields[1], "%Y-%m-%d %H:%M:%S"))
+            for i in range(len(fields[2:])):
+                dataSeries[i].append(int(fields[2+i]))
+        return dataSeries, labels, filePositions, seriesInfo
+
 ####
 # Plot drawing part
 #####
@@ -550,22 +586,32 @@ class Gui:
 
 def main():
     parser = argparse.ArgumentParser(description="Draw a graph of amount of logs in time")
-    parser.add_argument("filename")
+    parser.add_argument("filename", default=None, nargs='?')
     parser.add_argument("-f", "--timestamp-format", help="see 'man date' for format description")
     parser.add_argument("-k", "--keyword", action="append", default=[])
     parser.add_argument("-e", "--regex", action="append", default=[])
+    parser.add_argument("-o", "--data-output")
+    parser.add_argument("-i", "--data-input")
+    parser.add_argument("-q", "--no-gui", action="store_true")
     args = parser.parse_args()
-    analyzer = LogAnalyzer()
-    for keyword in args.keyword:
-        analyzer.addKeyword(keyword)
-    for regex in args.regex:
-        analyzer.addRegex(regex)
-    data = analyzer.analyzeLog(args.filename, args.timestamp_format)
-    if data is None:
-        return
-    plot = Plot(data)
-    gui = Gui(plot)
-    gui.mainloop()
+    if args.data_input is None:
+        # No data input file provided - run analysis
+        analyzer = LogAnalyzer()
+        for keyword in args.keyword:
+            analyzer.addKeyword(keyword)
+        for regex in args.regex:
+            analyzer.addRegex(regex)
+        data = analyzer.analyzeLog(args.filename, args.timestamp_format)
+        if data is None:
+            return
+    else:
+        data = importDataFromFile(args.data_input)
+    if args.data_output is not None:
+        exportDataToFile(data, args.data_output)
+    if not args.no_gui:
+        plot = Plot(data)
+        gui = Gui(plot)
+        gui.mainloop()
 
 if __name__ == "__main__":
     main()
